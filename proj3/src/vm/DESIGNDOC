@@ -1,0 +1,309 @@
+       	    +---------------------------+
+		    |		CS 140		        |
+		    | PROJECT 3: VIRTUAL MEMORY	|
+		    |	   DESIGN DOCUMENT	    |
+		    +---------------------------+
+
+---- GROUP ----
+
+>> Fill in the names and email addresses of your group members.
+
+Alexandra Klimenko <klimenko@usc.edu>
+Rohan Sharmaro <sharmaro@usc.edu>
+
+---- PRELIMINARIES ----
+
+>> If you have any preliminary comments on your submission, notes for the
+>> TAs, or extra credit, please give them here.
+
+>> Please cite any offline or online sources you consulted while
+>> preparing your submission, other than the Pintos documentation, course
+>> text, lecture notes, and course staff.
+
+
+			PAGE TABLE MANAGEMENT
+			=====================
+
+---- DATA STRUCTURES ----
+
+>> A1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+struct lock frame_table_lock;
+struct hash frame_table; //initialized in init.c
+
+struct frame {
+    void* phys_addr;            /* physical address of the frame */
+    struct page* paired_page;   /* paired page struct of the frame */ 
+    struct hash_elem h_elem;    /* hash element for frame table */
+    struct thread* owner;       /* The thread that owns the frame */
+};
+
+enum page_flag {
+    FILE,
+    ZERO,
+    SWAP
+};
+
+struct page {
+    void* kaddr; /* Mapped kernel (physical) address of the frame. */
+    void* uaddr; /* User virtual address of the page */
+    
+    bool loaded; /* If the page is allocated and mapped to a frame */
+    enum page_flag flag; /* Flag of how this page should be loaded */
+
+    struct file *fptr; /* File that waited to be loaded to the page */
+    off_t ofs;         /* Offset of where to start loading the file */
+    size_t read_bytes; /* How many bytes needed to be read */
+    size_t zero_bytes; /* How many bytes needed to be zeroed out */
+    bool writable; /* If the file is read-only and read-and-write */
+
+    size_t swap_id; /* Swap block sector id. */
+    
+    // Pinned is set to true if kernel code is currently accessing the page table entry
+    bool pinned;
+    bool dirty;
+
+    struct hash_elem h_elem; /* Hash element for thread's supplementary page table. */  
+};
+
+inside thread.h : struct hash pages;
+
+---- ALGORITHMS ----
+
+>> A2: In a few paragraphs, describe your code for locating the frame,
+>> if any, that contains the data of a given page.
+
+We decided not to do lazy loading, so the only place this gets triggered 
+is in the fault handler in "exception.c". The majority of the logic takes
+place in the "load_page" function defined in "page.c". It manipulates the
+current thread's pagedir and page table to create a frame for a page (which
+should already have been instantiated in one of the "create_page" functions).
+Executing again should allow the instruction that caused a fault previously
+to proceed successfully as the memory had just been allocated.
+
+
+>> A3: How does your code coordinate accessed and dirty bits between
+>> kernel and user virtual addresses that alias a single frame, or
+>> alternatively how do you avoid the issue?
+
+The kernel only uses user virtual addresses for memory accesses, thereby
+avoiding the issue.
+
+---- SYNCHRONIZATION ----
+
+>> A4: When two user processes both need a new frame at the same time,
+>> how are races avoided?
+
+"palloc_get_page" is used to allocate frames sequentially: internally, 
+another process is prevented from achieving the same return as the first 
+process to call the function. The frame table should also be used in the
+eviction process according to our understanding. 
+
+---- RATIONALE ----
+
+>> A5: Why did you choose the data structure(s) that you did for
+>> representing virtual-to-physical mappings?
+
+For my the most part, they were given to us a useful starting point by
+Zijing. However, memory mapping would be inconvenient if the mmap entry
+struct used only the two provided fields. It was necessary to keep track
+of the pages related to the file, and rather than having a list of them 
+we simply decided to track the starting address and the size, because
+we are given the fact of their size and that they will be placed consecutively.
+Zijing didn't have a dirty boolean in the page struct, however we added this
+also for convenience in memory mapping. 
+
+		       PAGING TO AND FROM DISK
+		       =======================
+
+---- DATA STRUCTURES ----
+
+>> B1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+static struct block *swap_block; // stores the block device for swapping
+static struct bitmap *swap_table; // represents whether pages are occupying
+//consecutive sectors on the disk, otherwise they are "free" and may be used 
+//by other pages for swap purposes
+
+static const size_t SECTORS_PER_PAGE = PGSIZE / BLOCK_SECTOR_SIZE;
+static size_t swap_size; // = block_size(swap_block) / SECTORS_PER_PAGE;
+
+---- ALGORITHMS ----
+
+>> B2: When a frame is required but none is free, some frame must be
+>> evicted.  Describe your code for choosing a frame to evict.
+
+We didn't finish implementing this, but it would have been triggered 
+in our "frame.c" create_frame function, in the case where palloc_get_page
+returned NULL. We would then do a while loop through our global frame_table
+check for a frame that is not pinned by the kernel (being loaded in another
+process for example), and evict it. If we reached the end of the table without
+finding such a frame we would set the "list_end" back to "list_beginning", giving
+us the foundation for a good FIFO implementation. Eviction would also be another 
+place where the dirty bit would come in handy for making sure changes to mmaped
+frames are written back to their respective files prior to being evicted and lost
+permanently. 
+
+
+>> B3: When a process P obtains a frame that was previously used by a
+>> process Q, how do you adjust the page table (and any other data
+>> structures) to reflect the frame Q no longer has?
+
+We haven't implement this yet, but probably this frame would have been
+evicted, or freed naturally upon process Q's exit. Therefore, a "new" frame
+with the same kernel address would have been either zeroed, or read into and
+mapped within the new process's page table with new pages allocated for its
+own needs. 
+
+
+---- SYNCHRONIZATION ----
+
+>> B5: Explain the basics of your VM synchronization design.  In
+>> particular, explain how it prevents deadlock.  (Refer to the
+>> textbook for an explanation of the necessary conditions for
+>> deadlock.)
+
+We use a frame_table_lock to allocate frames because it is a global
+scope list. Access to a page's user-level virtual address through
+a syscall or pagefault should trigger the pin and release only when
+access is done (this prevents eviction from occuring while access is 
+still needed).
+
+
+>> B6: A page fault in process P can cause another process Q's frame
+>> to be evicted.  How do you ensure that Q cannot access or modify
+>> the page during the eviction process?  How do you avoid a race
+>> between P evicting Q's frame and Q faulting the page back in?
+
+We would have pinned Q's pages to prevent them from being touched during
+eviction, thus after eviction completes Q would have to load the pages 
+again upon fault. Pinning requires holding of the frame_table_lock, and
+this allows only one process to do either pinning or unpinning at a time.
+
+>> B7: Suppose a page fault in process P causes a page to be read from
+>> the file system or swap.  How do you ensure that a second process Q
+>> cannot interfere by e.g. attempting to evict the frame while it is
+>> still being read in?
+
+Through the same mechaisms already mentioned.
+
+>> B8: Explain how you handle access to paged-out pages that occur
+>> during system calls.  Do you use page faults to bring in pages (as
+>> in user programs), or do you have a mechanism for "locking" frames
+>> into physical memory, or do you use some other design?  How do you
+>> gracefully handle attempted accesses to invalid virtual addresses?
+
+In "read", we rely on the page fault handler, but in "write" we decided 
+to load all the pages in advance (pinning them for the write, and then 
+subsequently unpinning) so that this issue is avoided. 
+
+
+---- RATIONALE ----
+
+>> B9: A single lock for the whole VM system would make
+>> synchronization easy, but limit parallelism.  On the other hand,
+>> using many locks complicates synchronization and raises the
+>> possibility for deadlock but allows for high parallelism.  Explain
+>> where your design falls along this continuum and why you chose to
+>> design it this way.
+
+We decided to go with using the simple booleans for pinning pages. This
+design fails under strenuous frame evictions which led us to think of 
+disabling interrupts, but the simplicity of letting the page fault handler
+operate atomically was most appealing to us.
+
+			 MEMORY MAPPED FILES
+			 ===================
+
+---- DATA STRUCTURES ----
+
+>> C1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+inside thread.h : struct list mmaps;
+
+struct mentry {
+    mapid_t mapid;
+    size_t size; 
+    void *start;
+    struct file* file; //pointer to the file
+    struct list_elem elem; //elem for list inside thread
+};
+
+---- ALGORITHMS ----
+
+>> C2: Describe how memory mapped files integrate into your virtual
+>> memory subsystem.  Explain how the page fault and eviction
+>> processes differ between swap pages and other pages.
+
+We decided to use a list for memory mapped files. mmap and munmap
+(we prefixed them with my_ for clarity) load the file into, and unload from their
+set of pages mapped to memory until it is opportune for the memory to be reused.
+Dirty pages are written back to their respective files and "clean" pages need not be.
+Upon process_exit all memory mapped files for the exitting process are unmapped.
+
+>> C3: Explain how you determine whether a new file mapping overlaps
+>> any existing segment.
+
+We loop through the intended virtual address space, incrementing by
+PAGESIZE until the difference between the starting address and the 
+filesize has been iterated over, and if at any one of those consecutive
+addresses there exists an entry either in our page table or the pintos
+internal page table, then mmap fails (they must all be free).
+
+
+---- RATIONALE ----
+
+>> C4: Mappings created with "mmap" have similar semantics to those of
+>> data demand-paged from executables, except that "mmap" mappings are
+>> written back to their original files, not to swap.  This implies
+>> that much of their implementation can be shared.  Explain why your
+>> implementation either does or does not share much of the code for
+>> the two situations.
+
+Both scenarios share the "load_page" functonality in "page.c". A fundamental
+difference in end behavior, however, is how setting the dirty boolean to false
+in load_page affected memory mapped pages: "clean" pages, that is ones whose
+pages have not been modified, are NOT written back to their file as dirty ones 
+should be, because there are no changes to record to disk!
+
+			   SURVEY QUESTIONS
+			   ================
+
+>> In your opinion, was this assignment, or any one of the three problems
+>> in it, too easy or too hard?  Did it take too long or too little time?
+
+Coming up with a way to implement a better eviction strategy than FIFO (such
+as LRU) would be a good use of time if were better at using our time :)
+
+>> Did you find that working on a particular part of the assignment gave
+>> you greater insight into some aspect of OS design?
+
+Yes, I believe this is a great assignment, I wish we had more time 
+to finish it, either more late days or have last project deadline due
+end of finals week.
+
+
+>> Is there some particular fact or hint we should give students in
+>> future quarters to help them solve the problems?  Conversely, did you
+>> find any of our guidance to be misleading?
+
+I think the header files provided by cp were a bit misleading, since
+there are many implementations. I wish we had more guidance on the 
+logic and pseudocode for the most important parts.
+
+>> Do you have any suggestions for the TAs to more effectively assist
+>> students, either for future quarters or the remaining projects?
+
+If CPs had an outline/solution that was shared between them so they
+don't contradict each other, also tell us we should use <hash.h> not
+pintos's lib/hash for hashing (was stuck on that for a while). 
+
+>> Any other comments?
+
+Thank you, CPs, for all your virtuous patience this semester!
